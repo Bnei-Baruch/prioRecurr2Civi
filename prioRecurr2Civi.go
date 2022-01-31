@@ -1,3 +1,4 @@
+// go build prioRecurr2Civi.go ; strip prioRecurr2Civi; cp prioRecurr2Civi /media/sf_projects/bbpriority/
 package main
 
 import (
@@ -138,7 +139,7 @@ var paymentFromPrio = regexp.MustCompile(`^\d+$`)
 func GetListFromPelecard(terminal, from, to string) (payments []types.GetTransDataResponse, err error) {
 	card := &pelecard.PeleCard{}
 	if err = card.Init(terminal); err != nil {
-		return nil, errors.Wrapf(err, "GetListFromPelecard: Unable to initialize: %s", )
+		return nil, errors.Wrapf(err, "GetListFromPelecard: Unable to initialize: %s")
 	}
 	err, response := card.GetTransData(from, to)
 	if err != nil {
@@ -216,6 +217,10 @@ func HandleContributions(contributions []Contribution) (err error) {
 		`
 
 	for _, contribution := range contributions {
+		for _, c := range contributions {
+			fmt.Printf("\t%+v\n", c)
+		}
+
 		if contribution.ID == "40" || contribution.ID == "57" || contribution.ID == "51" || contribution.ID == "130" || contribution.ID == "151" {
 			continue
 		}
@@ -304,9 +309,11 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 	urlBase := prioApiUrl + prioApiOrg
 
 	for _, payment := range payments {
-		fmt.Print(".")
+		fmt.Printf("Payment: %+v\n\n", payment)
+
 		uri := urlBase + "/PAYMENT2_CHANGES?$filter=PAYMENT eq " + payment.ParamX + "&$select=IVNUM"
 		data, err := getPelecardData(uri)
+		fmt.Printf("PAYMENT2_CHANGES for %s: %+v\n", payment.ParamX, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "PAYMENT2_CHANGES for %s: error\n", payment.ParamX)
 		}
@@ -317,10 +324,12 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		ivnum := data.Value[0]["IVNUM"].(string)
 		uri = urlBase + "/TINVOICES?$filter=IVNUM eq '" + ivnum + "'&$expand=TPAYMENT2_SUBFORM($select=CCUID,PAYDATE),TFNCITEMS_SUBFORM($select=FNCIREF1)"
 		data, err = getPelecardData(uri)
+		fmt.Printf("TINVOICES for %s, %d: %+v\n", ivnum, len(data.Value), data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "TINVOICES for %s: error\n", payment.ParamX)
 		}
 		if len(data.Value) == 0 {
+			log.Printf("No pelecard Data: %s", uri)
 			continue
 		}
 		value := data.Value[0]
@@ -329,7 +338,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			is46 = data.Value[0]["QAMT_PRINT46"].(string)
 		}
 		if is46 != "D" { // Donation
-			//log.Printf("############## Payment %s: is not DONATION, but >%s<\n", item, is46)
+			log.Printf("############## Payment is not DONATION, but >%s<\n", is46)
 			continue
 		}
 		custname := value["CUSTNAME"].(string)
@@ -339,6 +348,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		payDate := results[1]
 		uri = urlBase + "/CINVOICES?$filter=IVNUM eq '" + ivSubnum + "'&$expand=CINVOICEITEMS_SUBFORM($select=PRICE,ICODE,ACCNAME,DSI_DETAILS)"
 		data, err = getPelecardData(uri)
+		fmt.Printf("CINVOICES for %s: %+v\n", ivSubnum, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "CINVOICES for %s: error\n", payment.ParamX)
 		}
@@ -353,10 +363,12 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		amount := getByRefInt(data.Value[0], "CINVOICEITEMS_SUBFORM", "PRICE")[0]
 		uri = urlBase + "/QAMO_LOADINTENET?$filter=QAMO_CUSTNAME eq '" + custname + "'&$select=QAMT_REFRENCE,QAMO_PRICE,QAMO_CURRNCY,QAMO_PARTNAME"
 		data, err = getPelecardData(uri)
+		fmt.Printf("QAMO_LOADINTENET for %s: %+v\n", custname, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "QAMO_LOADINTENET for %s: error\n", payment.ParamX)
 		}
 		contributionId := ""
+		fmt.Printf("search for amount %d, currency %s, sku %s\n", amount, currency, sku)
 		for _, value := range data.Value {
 			if value["QAMO_PRICE"].(float64) == float64(amount) &&
 				value["QAMO_CURRNCY"].(string) == currency &&
@@ -366,8 +378,10 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			}
 		}
 		if contributionId == "" {
+			fmt.Printf("contributionId not found\n")
 			continue
 		}
+		fmt.Printf("contributionId: %s\n", contributionId)
 		if currency == "ש\"ח" {
 			currency = "ILS"
 		}
