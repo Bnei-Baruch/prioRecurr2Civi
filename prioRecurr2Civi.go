@@ -1,4 +1,4 @@
-// go build prioRecurr2Civi.go ; strip prioRecurr2Civi; cp prioRecurr2Civi /media/sf_projects/bbpriority/
+// go build prioRecurr2Civi.go ; strip prioRecurr2Civi; cp prioRecurr2Civi /media/sf_projects/bbpriority/prioRecurr2Civi-test
 package main
 
 import (
@@ -33,6 +33,16 @@ var civiSiteKey = os.Getenv("CIVI_SITE_KEY")
 var civiSiteUrl = os.Getenv("CIVI_SITE_URL")
 
 var civiPaymentProcessor = "75"
+
+var findContactPattern = fmt.Sprintf("%s?entity=Contribution&action=get&api_key=%s&key=%s&json={\"return\":\"payment_instrument_id,campaign_id,financial_type_id,contribution_id,contribution_page_id,contact_id,currency,total_amount,contribution_source,\",\"id\":%%s}", civiSiteUrl, civiApiKey, civiSiteKey)
+var findFinancialTypePattern = fmt.Sprintf("%s?entity=FinancialType&action=get&api_key=%s&key=%s&json={\"id\":%%s}", civiSiteUrl, civiApiKey, civiSiteKey)
+var createContributionUrl = fmt.Sprintf("%s?entity=Contribution&action=create&api_key=%s&key=%s&json=1", civiSiteUrl, civiApiKey, civiSiteKey)
+
+const insertBbPaymentResponse = `
+			INSERT INTO civicrm_bb_payment_responses(trxn_id, cid, cardtype, cardnum, cardexp, firstpay, installments, response, amount, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,  NOW())
+		`
+const checkBbPaymentTrxnId = `SELECT count(1) as found FROM civicrm_bb_payment_responses WHERE trxn_id = ?`
 
 type ResponseStruct struct {
 	Value []map[string]interface{} `json:"value"`
@@ -74,6 +84,13 @@ type CiviGetFinancialType struct {
 	Values map[string]CiviGetFinancialTypeData `json:"values"`
 }
 
+type Terminal struct {
+	Terminal string
+	User     string
+	Password string
+	Name     string
+}
+
 var db *sqlx.DB
 
 func main() {
@@ -94,17 +111,42 @@ func main() {
 	db = OpenDb()
 	defer db.Close()
 
-	RegularTerminal := os.Getenv("PELECARD_TERMINAL")
-	log.Println("Regular Terminal")
-	handleTerminal(RegularTerminal, from, to)
-	RecurrTerminal := os.Getenv("PELECARD_RECURR_TERMINAL")
-	log.Println("Recurrent Payments Terminal")
-	handleTerminal(RecurrTerminal, from, to)
+	terminals := []*Terminal{
+		{
+			Name:     "BB Payments Terminal",
+			Terminal: os.Getenv("ben2_PELECARD_TERMINAL"),
+			User:     os.Getenv("ben2_PELECARD_USER"),
+			Password: os.Getenv("ben2_PELECARD_PASSWORD"),
+		},
+		{
+			Name:     "BB Recurrent Payments Terminal",
+			Terminal: os.Getenv("PELECARD_RECURR_TERMINAL"),
+			User:     os.Getenv("PELECARD_USER"),
+			Password: os.Getenv("PELECARD_PASSWORD"),
+		},
+		{
+			Name:     "Family Payments Terminal",
+			Terminal: os.Getenv("meshp18_PELECARD_TERMINAL"),
+			User:     os.Getenv("meshp18_PELECARD_USER"),
+			Password: os.Getenv("meshp18_PELECARD_PASSWORD"),
+		},
+		{
+			Name:     "Arvut Payments Terminal",
+			Terminal: os.Getenv("PELECARD_TERMINAL1"),
+			User:     os.Getenv("PELECARD_USER1"),
+			Password: os.Getenv("PELECARD_PASSWORD1"),
+		},
+	}
+	for _, terminal := range terminals {
+		handleTerminal(terminal, from, to)
+	}
 	log.Println("Done")
 }
 
-func handleTerminal(terminal, from, to string) {
+func handleTerminal(terminal *Terminal, from, to string) {
 	var err error
+
+	fmt.Printf("\n\nTerminal: %s\n\n", terminal.Name)
 
 	// 1. Get list of payments from Pelecard for yesterday and filter out those starting with civicrm
 	payments, err := GetListFromPelecard(terminal, from, to)
@@ -136,16 +178,16 @@ func handleTerminal(terminal, from, to string) {
 
 var paymentFromPrio = regexp.MustCompile(`^\d+$`)
 
-func GetListFromPelecard(terminal, from, to string) (payments []types.GetTransDataResponse, err error) {
+func GetListFromPelecard(terminal *Terminal, from, to string) (payments []types.GetTransDataResponse, err error) {
+	fmt.Println("--> GetListFromPelecard")
 	card := &pelecard.PeleCard{}
-	if err = card.Init(terminal); err != nil {
-		return nil, errors.Wrapf(err, "GetListFromPelecard: Unable to initialize: %s")
+	if err = card.Init(terminal.Terminal, terminal.User, terminal.Password); err != nil {
+		return nil, errors.Wrapf(err, "GetListFromPelecard:: Unable to initialize: %s")
 	}
 	err, response := card.GetTransData(from, to)
 	if err != nil {
 		return nil, errors.Wrapf(err, "GetTransData: error")
 	}
-	checkBbPaymentTrxnId := `SELECT count(1) as found FROM civicrm_bb_payment_responses WHERE trxn_id = ?`
 	for _, item := range response {
 		if paymentFromPrio.MatchString(item.ParamX) {
 			var count int
@@ -175,11 +217,11 @@ func OpenDb() (db *sqlx.DB) {
 
 	host := os.Getenv("CIVI_HOST")
 	if host == "" {
-		host = "localhost"
+		log.Fatalf("Unable to connect without host\n")
 	}
 	dbName := os.Getenv("CIVI_DBNAME")
 	if dbName == "" {
-		dbName = "localhost"
+		log.Fatalf("Unable to connect without \tdbName := os.Getenv(\"CIVI_DBNAME\")\n\n")
 	}
 	user := os.Getenv("CIVI_USER")
 	if user == "" {
@@ -206,21 +248,12 @@ func OpenDb() (db *sqlx.DB) {
 }
 
 func HandleContributions(contributions []Contribution) (err error) {
-	// Get from Civi customer, amount and currency of the above contribution
-	findContactPattern := fmt.Sprintf("%s?entity=Contribution&action=get&api_key=%s&key=%s&json={\"return\":\"payment_instrument_id,campaign_id,financial_type_id,contribution_id,contribution_page_id,contact_id,currency,total_amount,contribution_source,\",\"id\":%%s}", civiSiteUrl, civiApiKey, civiSiteKey)
-	findFinancialTypePattern := fmt.Sprintf("%s?entity=FinancialType&action=get&api_key=%s&key=%s&json={\"id\":%%s}", civiSiteUrl, civiApiKey, civiSiteKey)
-	createContributionUrl := fmt.Sprintf("%s?entity=Contribution&action=create&api_key=%s&key=%s&json=1", civiSiteUrl, civiApiKey, civiSiteKey)
-
-	insertBbPaymentRespose := `
-			INSERT INTO civicrm_bb_payment_responses(trxn_id, cid, cardtype, cardnum, cardexp, firstpay, installments, response, amount, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,  NOW())
-		`
+	fmt.Println("---> HandleContributions: ", len(contributions))
+	for _, c := range contributions {
+		fmt.Printf("\t%+v\n", c)
+	}
 
 	for _, contribution := range contributions {
-		for _, c := range contributions {
-			fmt.Printf("\t%+v\n", c)
-		}
-
 		if contribution.ID == "40" || contribution.ID == "57" || contribution.ID == "51" || contribution.ID == "130" || contribution.ID == "151" {
 			continue
 		}
@@ -266,9 +299,10 @@ func HandleContributions(contributions []Contribution) (err error) {
 			"custom_941":            {"2"},                  // Monthly donation
 			"custom_942":            {"1"},                  // Credit Card
 		}
+		fmt.Printf(" --->>> Create new contribution\n\t%v\n", formData)
 		resp, err = http.PostForm(createContributionUrl, formData)
 		if err != nil {
-			fmt.Printf(" -- Unable create new contribution (%v): %s\n", err, uri)
+			fmt.Printf(" -- Unable create new contribution (%v): %s\n", err, createContributionUrl)
 			continue
 		}
 		response := map[string]interface{}{}
@@ -285,7 +319,7 @@ func HandleContributions(contributions []Contribution) (err error) {
 		if err != nil {
 			log.Fatalf("Marshal error: %v\n", err)
 		}
-		_, err = db.Exec(insertBbPaymentRespose,
+		_, err = db.Exec(insertBbPaymentResponse,
 			contribution.Pelecard.TrxnId,
 			id,
 			contribution.Pelecard.CardType,
@@ -307,10 +341,10 @@ func HandleContributions(contributions []Contribution) (err error) {
 
 func GetPriorityContributions(payments []types.GetTransDataResponse) (contributions []Contribution, err error) {
 	urlBase := prioApiUrl + prioApiOrg
+	fmt.Println("--> GetPriorityContributions")
 
 	for _, payment := range payments {
-		fmt.Printf("Payment: %+v\n\n", payment)
-
+		fmt.Printf("--> Payment %s: %+v\n", payment.ParamX, payment)
 		uri := urlBase + "/PAYMENT2_CHANGES?$filter=PAYMENT eq " + payment.ParamX + "&$select=IVNUM"
 		data, err := getPelecardData(uri)
 		fmt.Printf("PAYMENT2_CHANGES for %s: %+v\n", payment.ParamX, data)
@@ -318,7 +352,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			return nil, errors.Wrapf(err, "PAYMENT2_CHANGES for %s: error\n", payment.ParamX)
 		}
 		if len(data.Value) != 1 {
-			log.Printf("############## Payment %s: [1] Data is not array: %#v\n", payment.ParamX, data.Value)
+			log.Printf("############## Payment %s: [1] Data is not an array: %#v\n", payment.ParamX, data.Value)
 			continue
 		}
 		ivnum := data.Value[0]["IVNUM"].(string)
@@ -329,21 +363,25 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			return nil, errors.Wrapf(err, "TINVOICES for %s: error\n", payment.ParamX)
 		}
 		if len(data.Value) == 0 {
-			log.Printf("No pelecard Data: %s", uri)
+			log.Printf("No priority Data: %s\n", uri)
 			continue
 		}
 		value := data.Value[0]
-		is46 := ""
+		is46 := false
 		if value["QAMT_PRINT46"] != nil {
-			is46 = data.Value[0]["QAMT_PRINT46"].(string)
+			is46 = value["QAMT_PRINT46"].(string) == "D"
 		}
-		if is46 != "D" { // Donation
-			log.Printf("############## Payment is not DONATION, but >%s<\n", is46)
+		//if is46 != "D" { // Donation
+		//	log.Printf("############## Payment is not DONATION, but >%s<\n", is46)
+		//	continue
+		//}
+		if value["CUSTNAME"] == nil {
+			fmt.Println("No CUSTNAME, continue")
 			continue
 		}
 		custname := value["CUSTNAME"].(string)
-		ivSubnum := getByRefString(data.Value[0], "TFNCITEMS_SUBFORM", "FNCIREF1")[0]
-		results := getByRefString(data.Value[0], "TPAYMENT2_SUBFORM", "CCUID", "PAYDATE")
+		ivSubnum := getByRef[string](data.Value[0], "TFNCITEMS_SUBFORM", "FNCIREF1")[0]
+		results := getByRef[string](data.Value[0], "TPAYMENT2_SUBFORM", "CCUID", "PAYDATE")
 		//token := results[0][5:15]
 		payDate := results[1]
 		uri = urlBase + "/CINVOICES?$filter=IVNUM eq '" + ivSubnum + "'&$expand=CINVOICEITEMS_SUBFORM($select=PRICE,ICODE,ACCNAME,DSI_DETAILS)"
@@ -356,12 +394,12 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			log.Printf("############## Payment %s: [2] Data is not array: %#v\n", payment.ParamX, data.Value)
 			continue
 		}
-		results = getByRefString(data.Value[0], "CINVOICEITEMS_SUBFORM", "ICODE", "ACCNAME", "DSI_DETAILS")
+		results = getByRef[string](data.Value[0], "CINVOICEITEMS_SUBFORM", "ICODE", "ACCNAME", "DSI_DETAILS")
 		currency := results[0]
 		sku := results[1]
 		description := results[2]
-		amount := getByRefInt(data.Value[0], "CINVOICEITEMS_SUBFORM", "PRICE")[0]
-		uri = urlBase + "/QAMO_LOADINTENET?$filter=QAMO_CUSTNAME eq '" + custname + "'&$select=QAMT_REFRENCE,QAMO_PRICE,QAMO_CURRNCY,QAMO_PARTNAME"
+		amount := getByRef[int](data.Value[0], "CINVOICEITEMS_SUBFORM", "PRICE")[0]
+		uri = urlBase + "/QAMO_LOADINTENET?$filter=QAMO_CUSTNAME eq '" + custname + "'&$select=QAMT_REFRENCE,QAMO_PRICE,QAMO_CURRNCY,QAMO_PARTNAME,QAMO_MONTHLY"
 		data, err = getPelecardData(uri)
 		fmt.Printf("QAMO_LOADINTENET for %s: %+v\n", custname, data)
 		if err != nil {
@@ -370,6 +408,13 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		contributionId := ""
 		fmt.Printf("search for amount %d, currency %s, sku %s\n", amount, currency, sku)
 		for _, value := range data.Value {
+			monthly := false
+			if value["QAMO_MONTHLY"] != nil {
+				monthly = value["QAMO_MONTHLY"].(string) == "Y"
+			}
+			if !(is46 || monthly) {
+				continue
+			}
 			if value["QAMO_PRICE"].(float64) == float64(amount) &&
 				value["QAMO_CURRNCY"].(string) == currency &&
 				value["QAMO_PARTNAME"].(string) == sku {
@@ -381,7 +426,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 			fmt.Printf("contributionId not found\n")
 			continue
 		}
-		fmt.Printf("contributionId: %s\n", contributionId)
+		fmt.Printf("  ===> FOUNDcontributionId: %s\n", contributionId)
 		if currency == "ש\"ח" {
 			currency = "ILS"
 		}
@@ -419,20 +464,10 @@ func getPelecardData(uri string) (data ResponseStruct, err error) {
 	return
 }
 
-func getByRefString(ref map[string]interface{}, idx1 string, idx2 ...string) (res []string) {
-	jbody, _ := json.Marshal(ref[idx1])
-	var x []map[string]string
-	_ = json.Unmarshal(jbody, &x)
-	for _, idx := range idx2 {
-		res = append(res, x[0][idx])
-	}
-	return
-}
-
-func getByRefInt(ref map[string]interface{}, idx1 string, idx2 ...string) (res []int) {
-	jbody, _ := json.Marshal(ref[idx1])
-	var x []map[string]int
-	_ = json.Unmarshal(jbody, &x)
+func getByRef[T any](ref map[string]interface{}, idx1 string, idx2 ...string) (res []T) {
+	body, _ := json.Marshal(ref[idx1])
+	var x []map[string]T
+	_ = json.Unmarshal(body, &x)
 	for _, idx := range idx2 {
 		res = append(res, x[0][idx])
 	}

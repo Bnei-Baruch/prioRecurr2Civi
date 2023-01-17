@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-
 	"prioRecurr2Civi/types"
 )
 
@@ -18,32 +16,26 @@ type PeleCard struct {
 	Terminal string `json:"terminalNumber"`
 }
 
-func (p *PeleCard) Init(terminal string) (err error) {
-	p.User = os.Getenv("PELECARD_USER")
-	p.Password = os.Getenv("PELECARD_PASSWORD")
-	p.Terminal = terminal
-	p.Url = "https://gateway20.pelecard.biz:443/services"
+func (p *PeleCard) Init(terminal, user, password string) (err error) {
 	if p.User == "" || p.Password == "" || p.Terminal == "" {
 		err = fmt.Errorf("PELECARD parameters are missing")
 		return
 	}
+	p.User = user
+	p.Password = password
+	p.Terminal = terminal
+	p.Url = "https://gateway20.pelecard.biz:443/services"
 
 	return
 }
 
 func (p *PeleCard) GetTransData(start, end string) (err error, response []types.GetTransDataResponse) {
-	type GetTransDataParams struct {
+	var v = struct {
 		PeleCard
 		StartDate string `json:",omitempty"`
 		EndDate   string `json:",omitempty"`
-	}
-	var v = GetTransDataParams{
-		PeleCard: PeleCard{
-			p.Url,
-			p.User,
-			p.Password,
-			p.Terminal,
-		},
+	}{
+		PeleCard:  *p,
 		StartDate: start,
 		EndDate:   end,
 	}
