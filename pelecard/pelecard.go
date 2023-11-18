@@ -17,7 +17,7 @@ type PeleCard struct {
 }
 
 func (p *PeleCard) Init(terminal, user, password string) (err error) {
-	if p.User == "" || p.Password == "" || p.Terminal == "" {
+	if user == "" || password == "" || terminal == "" {
 		err = fmt.Errorf("PELECARD parameters are missing")
 		return
 	}

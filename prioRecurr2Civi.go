@@ -1,4 +1,4 @@
-// go build prioRecurr2Civi.go ; strip prioRecurr2Civi; cp prioRecurr2Civi /media/sf_projects/bbpriority/prioRecurr2Civi-test
+// CGO_ENABLED=0 go build prioRecurr2Civi.go && strip prioRecurr2Civi && upx -9 prioRecurr2Civi && cp prioRecurr2Civi /media/sf_D_DRIVE/projects/bbpriority/prioRecurr2Civi-test
 package main
 
 import (
@@ -182,7 +182,7 @@ func GetListFromPelecard(terminal *Terminal, from, to string) (payments []types.
 	fmt.Println("--> GetListFromPelecard")
 	card := &pelecard.PeleCard{}
 	if err = card.Init(terminal.Terminal, terminal.User, terminal.Password); err != nil {
-		return nil, errors.Wrapf(err, "GetListFromPelecard:: Unable to initialize: %s")
+		return nil, errors.Wrapf(err, "GetListFromPelecard:: Unable to initialize: %s", err.Error())
 	}
 	err, response := card.GetTransData(from, to)
 	if err != nil {
@@ -299,7 +299,6 @@ func HandleContributions(contributions []Contribution) (err error) {
 			"custom_941":            {"2"},                  // Monthly donation
 			"custom_942":            {"1"},                  // Credit Card
 		}
-		fmt.Printf(" --->>> Create new contribution\n\t%v\n", formData)
 		resp, err = http.PostForm(createContributionUrl, formData)
 		if err != nil {
 			fmt.Printf(" -- Unable create new contribution (%v): %s\n", err, createContributionUrl)
@@ -308,8 +307,8 @@ func HandleContributions(contributions []Contribution) (err error) {
 		response := map[string]interface{}{}
 		_ = json.NewDecoder(resp.Body).Decode(&response)
 		if response["is_error"].(float64) == 1 {
-			fmt.Printf(" -- Create new contribution %#v error: %s\n", formData, response["error_message"].(string))
-			continue
+			fmt.Printf(" -- Create new contribution (%#v) error: %s\n", response, response["error_message"].(string))
+			os.Exit(0)
 		}
 
 		id := int(response["id"].(float64))
