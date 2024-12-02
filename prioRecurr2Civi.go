@@ -1,4 +1,4 @@
-// CGO_ENABLED=0 go build prioRecurr2Civi.go && strip prioRecurr2Civi && upx -9 prioRecurr2Civi && cp prioRecurr2Civi /media/sf_D_DRIVE/projects/bbpriority/prioRecurr2Civi-test
+// CGO_ENABLED=0 go build prioRecurr2Civi.go && strip prioRecurr2Civi  && /usr/bin/upx -9 prioRecurr2Civi && cp prioRecurr2Civi /media/sf_D_DRIVE/projects/bbpriority/prioRecurr2Civi
 package main
 
 import (
@@ -92,6 +92,11 @@ type Terminal struct {
 }
 
 var db *sqlx.DB
+
+// Map new price to old ones
+var priceChanges map[int][]int = map[int][]int{
+	180: []int{100},
+}
 
 func main() {
 	t := time.Now()
@@ -191,13 +196,12 @@ func GetListFromPelecard(terminal *Terminal, from, to string) (payments []types.
 	for _, item := range response {
 		if paymentFromPrio.MatchString(item.ParamX) {
 			var count int
-			err = db.Get(&count, checkBbPaymentTrxnId, item.TrxnId)
-			if err != nil {
+			if err = db.Get(&count, checkBbPaymentTrxnId, item.TrxnId); err != nil {
 				fmt.Println(item.ParamX, " -- Error -- ", err)
 				continue
 			}
 			if count > 0 {
-				//fmt.Println(item.ParamX, " -- SKIP -- record already exists")
+				fmt.Printf("paramX: %s, count: %d -- SKIP -- record already exists\n", item.ParamX, count)
 				continue
 			}
 
@@ -249,10 +253,6 @@ func OpenDb() (db *sqlx.DB) {
 
 func HandleContributions(contributions []Contribution) (err error) {
 	fmt.Println("---> HandleContributions: ", len(contributions))
-	//for _, c := range contributions {
-	//	fmt.Printf("\t%+v\n", c)
-	//}
-
 	for _, contribution := range contributions {
 		if contribution.ID == "40" || contribution.ID == "57" || contribution.ID == "51" || contribution.ID == "130" || contribution.ID == "151" {
 			continue
@@ -284,13 +284,13 @@ func HandleContributions(contributions []Contribution) (err error) {
 
 		// Create new contribution marked as Done
 		var formData = url.Values{
-			"total_amount":          {paymentValues.Amount},
-			"currency":              {paymentValues.Currency},
+			"total_amount":          {strconv.Itoa(int(contribution.Amount))},
+			"currency":              {contribution.Currency},
 			"financial_type_id":     {financialTypeId},
 			"receive_date":          {contribution.PayDate},
 			"contact_id":            {paymentValues.ContactId},
 			"contribution_page_id":  {paymentValues.ContributionPageId},
-			"source":                {paymentValues.ContributionSource + " (recurrent)"},
+			"source":                {contribution.Description + " (recurrent)"},
 			"payment_instrument_id": {paymentValues.PaymentInstrumentId},
 			"campaign_id":           {paymentValues.CampaignId},
 			"tax_amount":            {"0"},
@@ -299,9 +299,10 @@ func HandleContributions(contributions []Contribution) (err error) {
 			"custom_941":            {"2"},                  // Monthly donation
 			"custom_942":            {"1"},                  // Credit Card
 		}
+		fmt.Printf(" --->>> Create new contribution\n\t%#v\n", formData)
 		resp, err = http.PostForm(createContributionUrl, formData)
 		if err != nil {
-			fmt.Printf(" -- Unable create new contribution (%v): %s\n", err, createContributionUrl)
+			fmt.Printf(" -- Unable create new contribution: %#v\n", err)
 			continue
 		}
 		response := map[string]interface{}{}
@@ -343,10 +344,10 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 	fmt.Println("--> GetPriorityContributions")
 
 	for _, payment := range payments {
-		//fmt.Printf("--> Payment %s: %+v\n", payment.ParamX, payment)
+		fmt.Printf("--> Payment %s: %#v\n", payment.ParamX, payment)
 		uri := urlBase + "/PAYMENT2_CHANGES?$filter=PAYMENT eq " + payment.ParamX + "&$select=IVNUM"
 		data, err := getPelecardData(uri)
-		//fmt.Printf("PAYMENT2_CHANGES for %s: %+v\n", payment.ParamX, data)
+		fmt.Printf("PAYMENT2_CHANGES for %s: %#v\n", payment.ParamX, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "PAYMENT2_CHANGES for %s: error\n", payment.ParamX)
 		}
@@ -357,7 +358,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		ivnum := data.Value[0]["IVNUM"].(string)
 		uri = urlBase + "/TINVOICES?$filter=IVNUM eq '" + ivnum + "'&$expand=TPAYMENT2_SUBFORM($select=CCUID,PAYDATE),TFNCITEMS_SUBFORM($select=FNCIREF1)"
 		data, err = getPelecardData(uri)
-		//fmt.Printf("TINVOICES for %s, %d: %+v\n", ivnum, len(data.Value), data)
+		fmt.Printf("TINVOICES for %s, %d: %#v\n", ivnum, len(data.Value), data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "TINVOICES for %s: error\n", payment.ParamX)
 		}
@@ -385,7 +386,7 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		payDate := results[1]
 		uri = urlBase + "/CINVOICES?$filter=IVNUM eq '" + ivSubnum + "'&$expand=CINVOICEITEMS_SUBFORM($select=PRICE,ICODE,ACCNAME,DSI_DETAILS)"
 		data, err = getPelecardData(uri)
-		//fmt.Printf("CINVOICES for %s: %+v\n", ivSubnum, data)
+		fmt.Printf("CINVOICES for %s: %#v\n", ivSubnum, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "CINVOICES for %s: error\n", payment.ParamX)
 		}
@@ -400,32 +401,29 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 		amount := getByRef[int](data.Value[0], "CINVOICEITEMS_SUBFORM", "PRICE")[0]
 		uri = urlBase + "/QAMO_LOADINTENET?$filter=QAMO_CUSTNAME eq '" + custname + "'&$select=QAMT_REFRENCE,QAMO_PRICE,QAMO_CURRNCY,QAMO_PARTNAME,QAMO_MONTHLY"
 		data, err = getPelecardData(uri)
-		//fmt.Printf("QAMO_LOADINTENET for %s: %+v\n", custname, data)
+		fmt.Printf("QAMO_LOADINTENET for %s: %#v\n", custname, data)
 		if err != nil {
 			return nil, errors.Wrapf(err, "QAMO_LOADINTENET for %s: error\n", payment.ParamX)
 		}
-		contributionId := ""
-		//fmt.Printf("search for amount %d, currency %s, sku %s\n", amount, currency, sku)
-		for _, value := range data.Value {
-			monthly := false
-			if value["QAMO_MONTHLY"] != nil {
-				monthly = value["QAMO_MONTHLY"].(string) == "Y"
-			}
-			if !(is46 || monthly) {
-				continue
-			}
-			if value["QAMO_PRICE"].(float64) == float64(amount) &&
-				value["QAMO_CURRNCY"].(string) == currency &&
-				value["QAMO_PARTNAME"].(string) == sku {
-				contributionId = value["QAMT_REFRENCE"].(string)
-				break
+		fmt.Printf("search for amount %d, currency %s, sku %s\n", amount, currency, sku)
+		contributionId := searchAmountCurrencySKU(data.Value, is46, amount, currency, sku)
+		if contributionId == "" {
+			fmt.Printf("exact amount not found\n")
+			// Search for a known price changes replacements are here
+			possibleAmounts := priceChanges[amount]
+			for _, pAmount := range possibleAmounts {
+				contributionId = searchAmountCurrencySKU(data.Value, is46, pAmount, currency, sku)
+				if contributionId != "" {
+					fmt.Printf("  ===> FOUND possible (%d) contributionId: %s\n", pAmount, contributionId)
+					break
+				}
 			}
 		}
 		if contributionId == "" {
 			//fmt.Printf("contributionId not found\n")
 			continue
 		}
-		//fmt.Printf("  ===> FOUNDcontributionId: %s\n", contributionId)
+		fmt.Printf("  ===> FOUND contributionId: %s\n", contributionId)
 		if currency == "ש\"ח" {
 			currency = "ILS"
 		}
@@ -441,6 +439,24 @@ func GetPriorityContributions(payments []types.GetTransDataResponse) (contributi
 	}
 	//fmt.Print("\n")
 	return
+}
+
+func searchAmountCurrencySKU(values []map[string]interface{}, is46 bool, amount int, currency string, sku string) string {
+	for _, value := range values {
+		monthly := false
+		if value["QAMO_MONTHLY"] != nil {
+			monthly = value["QAMO_MONTHLY"].(string) == "Y"
+		}
+		if !(is46 || monthly) {
+			continue
+		}
+		if value["QAMO_PRICE"].(float64) == float64(amount) &&
+			value["QAMO_CURRNCY"].(string) == currency &&
+			value["QAMO_PARTNAME"].(string) == sku {
+			return value["QAMT_REFRENCE"].(string)
+		}
+	}
+	return ""
 }
 
 func getPelecardData(uri string) (data ResponseStruct, err error) {
